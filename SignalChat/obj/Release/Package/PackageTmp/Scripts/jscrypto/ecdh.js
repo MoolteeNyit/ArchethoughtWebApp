@@ -2,8 +2,28 @@
 var chat = $.connection.chatHub;
 let ciphertext;
 let alicesKeyPair;
-let publicKeyJwk;
+let SenderpublicKeyJwk = "";
 let alicesSecretKey = "";
+var myusername = "";
+var currentchatuser = "";
+const arrdecryptmsg = [];
+var syncmsg = 0;
+
+// Get the user name and store it to prepend to messages.
+$('#chatbox').hide();
+//while (myusername == '' || myusername == null)
+//    myusername = prompt('Enter your name:', '');
+$('#message').focus();
+//$('#ContentPlaceHolder1_lblusername').text(myusername);
+// Start the connection.
+$.connection.hub.start().done(function () {
+    myusername = $('#ContentPlaceHolder1_lblusername').text();
+    chat.server.setuser(myusername);
+});
+
+function AddUser(Contactname) {
+    $('#username').append(Contactname);
+}
 
 /*
 Fetch the contents of the "message" textbox, and encode it
@@ -20,7 +40,7 @@ Encrypt the message using the secret key.
 Update the "ciphertextValue" box with a representation of part of
 the ciphertext.
 */
-async function encrypt(secretKey, text, chat) {
+async function encrypt(text) {
 
     let iv = new TextEncoder().encode("Initialization Vector");
     let encoded = getMessageEncoding(text);
@@ -30,16 +50,16 @@ async function encrypt(secretKey, text, chat) {
             name: "AES-GCM",
             iv: iv
         },
-        secretKey,
+        alicesSecretKey,
         encoded
     );
 
     const uintArray = new Uint8Array(ciphertext);
     const string = String.fromCharCode.apply(null, uintArray);
 
-    const base64Data = btoa(string);
+    return btoa(string);
 
-    chat.server.send($('#displayname').val(), base64Data);
+
 
 }
 
@@ -50,10 +70,9 @@ update the "decryptedValue" box with the decrypted value.
 If there was an error decrypting,
 update the "decryptedValue" box with an error message.
 */
-async function decrypt(secretKey, message, username) {
+async function decrypt(message) {
     let iv = new TextEncoder().encode("Initialization Vector");
     const string = atob(message);
-
 
     const uintArray = new Uint8Array(
         [...string].map((char) => char.charCodeAt(0))
@@ -63,24 +82,10 @@ async function decrypt(secretKey, message, username) {
             name: "AES-GCM",
             iv: iv
         },
-        secretKey,
+        alicesSecretKey,
         uintArray.buffer
     );
-    //const algorithm = {
-    //    name: "AES-GCM",
-    //    iv: iv,
-    //};
-    //const decryptedData = await window.crypto.subtle.decrypt(
-    //    algorithm,
-    //    secretKey,
-    //    uintArray
-    //);
-    let encodemsg = new TextDecoder().decode(decryptedData);
-    var encodedName = $('<div />').text(username).html();
-    var encodedMsg = $('<div />').text(message).html();
-    // Add the message to the page.
-    $('#discussion').append('<li><strong>Decrypt Message: ' + encodedName
-        + '</strong>:&nbsp;&nbsp;' + encodemsg + '</li>');
+    return new TextDecoder().decode(decryptedData);
 }
 
 /*
@@ -89,7 +94,6 @@ Derive an AES key, given:
 - their ECDH public key
 */
 async function deriveSecretKey(privateKey, publicKey) {
-
     return await window.crypto.subtle.deriveKey(
         {
             name: "ECDH",
@@ -106,7 +110,7 @@ async function deriveSecretKey(privateKey, publicKey) {
     );
 }
 
-async function agreeSharedSecretKey(chat) {
+async function agreeSharedSecretKey(sendername) {
     // Generate 2 ECDH key pairs: one for Alice and one for Bob
     // In more normal usage, they would generate their key pairs
     // separately and exchange public keys securely
@@ -118,30 +122,49 @@ async function agreeSharedSecretKey(chat) {
         true,
         ["deriveKey", "deriveBits"]
     );
-    publicKeyJwk = await window.crypto.subtle.exportKey(
+    var publicKeyJwk = await window.crypto.subtle.exportKey(
         "jwk",
         alicesKeyPair.publicKey
     );
-    chat.server.sendKey($('#displayname').val(), publicKeyJwk);
-}
-function SendMessage(chat) {
-    encrypt(alicesSecretKey, $('#message').val(), chat);
-}
-
-function SendKeyToServer(chat) {
-    agreeSharedSecretKey(chat);
+    var PrivateKeyJwk = await window.crypto.subtle.exportKey(
+        "jwk",
+        alicesKeyPair.privateKey
+    );
+    localStorage.setItem("PrivateKey_" + sendername.toLowerCase(), JSON.stringify(PrivateKeyJwk));
+    localStorage.setItem("PublicKey_" + sendername.toLowerCase(), JSON.stringify(publicKeyJwk));
 
 }
+async function SendMessage() {
+    var messagetosend = $('#message').val();
+    if (messagetosend.trim() != "") {
+        let base64Data = await encrypt($('#message').val());
+        if ($.connection.hub && $.connection.hub.state === $.signalR.connectionState.disconnected) {
+            $.connection.hub.start()
+        }
+        chat.server.send(myusername, base64Data, currentchatuser, JSON.parse(localStorage.getItem("PublicKey_" + currentchatuser.toLowerCase())));
+    }
+    setsendmessage(currentchatuser.toLowerCase(), messagetosend);
+    $('#message').val('').focus();
+}
 
+async function ReceiveMessages(message) {
+    for (var i = 0; i < message.length; i++) {
+        //currentchatuser = message[i].FromUsername;
+        var RestorePrivateKeyJwk = JSON.parse(localStorage.getItem("PrivateKey_" + message[i].FromUsername.toLowerCase()));
+        const privateKey = await window.crypto.subtle.importKey(
+            "jwk",
+            RestorePrivateKeyJwk,
+            {
+                name: "ECDH",
+                namedCurve: "P-256",
+            },
+            true,
+            ["deriveKey", "deriveBits"]
+        );
 
-
-
-// Create a function that the hub can call to broadcast messages.
-chat.client.broadcastMessage = async function (name, message, SenderpublicKeyJwk) {
-    if (alicesSecretKey == "") {
         const publicKey = await window.crypto.subtle.importKey(
             "jwk",
-            SenderpublicKeyJwk,
+            message[i].UserPublicKey,
             {
                 name: "ECDH",
                 namedCurve: "P-256"
@@ -149,25 +172,22 @@ chat.client.broadcastMessage = async function (name, message, SenderpublicKeyJwk
             true,
             []
         );
+        localStorage.setItem("SenderpublicKey_" + message[i].FromUsername.toLowerCase(), JSON.stringify(message[i].UserPublicKey));
+        alicesSecretKey = await deriveSecretKey(privateKey, publicKey);
+        let encodemsg = await decrypt(message[i].Message);
+        // Add the message to the page.
+        setreceivemessage(message[i].FromUsername.toLowerCase(), encodemsg, message[i].MessageDateTime);
 
-        alicesSecretKey = await deriveSecretKey(alicesKeyPair.privateKey, publicKey);
-        decrypt(alicesSecretKey, message, name);
     }
-    else {
-        decrypt(alicesSecretKey, message, name);
-    }
-    // Html encode display name and message.
-    var encodedName = $('<div />').text(name).html();
-    var encodedMsg = $('<div />').text(message).html();
-    // Add the message to the page.
-    $('#discussion').append('<li><strong>Encrypt Message: ' + encodedName
-        + '</strong>:&nbsp;&nbsp;' + encodedMsg + '</li>');
+}
+chat.client.receivemsg = async function (message) {
+    ReceiveMessages(message);
 };
-chat.client.getkey = async function (SenderpublicKeyJwk) {
 
-    const publicKey = await window.crypto.subtle.importKey(
+async function createsecretkey(SenderpublicKeyJWK, senderusername) {
+    const SenderpublicKey = await window.crypto.subtle.importKey(
         "jwk",
-        SenderpublicKeyJwk,
+        SenderpublicKeyJWK,
         {
             name: "ECDH",
             namedCurve: "P-256"
@@ -175,40 +195,68 @@ chat.client.getkey = async function (SenderpublicKeyJwk) {
         true,
         []
     );
+    await agreeSharedSecretKey(senderusername);
+    var PrivateKeyJwk = JSON.parse(localStorage.getItem("PrivateKey_" + senderusername.toLowerCase()));
+    const privateKey = await window.crypto.subtle.importKey(
+        "jwk",
+        PrivateKeyJwk,
+        {
+            name: "ECDH",
+            namedCurve: "P-256"
+        },
+        true,
+        ["deriveKey", "deriveBits"]
+    );
+    alicesSecretKey = await deriveSecretKey(privateKey, SenderpublicKey);
+    SendMessage();
+}
 
-    alicesSecretKey = await deriveSecretKey(alicesKeyPair.privateKey, publicKey);
+chat.client.getuserkey = async function (senderusername, receiverusername, name) {
+    //Addnewcontact(name);
+    await agreeSharedSecretKey(senderusername);
+    chat.server.sendKey(senderusername, receiverusername, JSON.parse(localStorage.getItem("PublicKey_" + senderusername.toLowerCase())));
 };
+chat.client.sendrequestkey = async function (senderpublickey, senderusername) {
+    await createsecretkey(senderpublickey, senderusername);
+};
+
+// Create a function that the hub can call to broadcast messages.
+chat.client.newuseradd = function (name, newmessaged) {
+    Addnewcontact(name);
+    ReceiveMessages(newmessaged);
+};
+
 chat.client.refreshpage = async function () {
     ciphertext = "";
     alicesKeyPair = "";
-    publicKeyJwk = "";
     alicesSecretKey = "";
+    myusername = "";
     location.reload();
 };
-// Get the user name and store it to prepend to messages.
-$('#displayname').val(prompt('Enter your name:', ''));
 
-// Set initial focus to message input box.
-$('#message').focus();
-// Start the connection.
-$.connection.hub.start().done(function () {
-    $('#lblusername').text($('#displayname').val());
-    SendKeyToServer(chat);
-    $('#sendmessage').click(function () {
-        // Call the Send method onthe hub.
-        SendMessage(chat);
-        // Clear text box and reset focus for next comment.
-        $('#message').val('').focus();
-    });
-
-    $('#sharekeys').click(function () {
-        if (alicesSecretKey == "") {
-            chat.server.askUserPublicKey($('#displayname').val());
+$('#sendmessage').click(async function () {
+    if (currentchatuser != '') {
+        var RestoreSenderpublicKey = JSON.parse(localStorage.getItem("SenderpublicKey_" + currentchatuser.toLowerCase()));
+        if (RestoreSenderpublicKey != null) {
+            createsecretkey(RestoreSenderpublicKey, currentchatuser);
         }
-    });
-    $('#clearusers').click(function () {
-        chat.server.clearUsersData();
-    });
+        else {
+            chat.server.askUserPublicKey(currentchatuser, myusername);
+        }
+    }
+});
+
+$('#signout').click(function () {
+    chat.server.signOut(myusername);
+});
+
+
+$('#clearcache').click(function () {
+    localStorage.removeItem("PrivateKey_" + currentchatuser.toLowerCase());
+    localStorage.removeItem("PublicKey_" + currentchatuser.toLowerCase());
+});
+$('#clearusers').click(function () {
+    chat.server.clearUsersData();
 });
 
 

@@ -97,5 +97,7 @@
             </div>
         </div>
     </section>
-
+    <script type="text/javascript">
+        localStorage.clear();
+    </script>
 </asp:Content>
